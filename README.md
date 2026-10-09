@@ -1,187 +1,105 @@
-## Experimental Results: LLM Tool Routing Benchmark
+# GPT-6 Luna Tool Router Benchmark — BFCL V3 자동 다운로드
 
-### 1. Experimental Setup
+BFCL V3 데이터셋을 Hugging Face에서 필요한 파일만 자동 다운로드하고, OpenAI Python SDK의 `chat.completions.create()`로 `gpt-6-luna`를 호출합니다. **EM(Exact Match) 지표는 없습니다.**
 
-| Configuration | Value |
-|---|---|
-| Model | GPT-6 Luna |
-| Reasoning Effort | None |
-| Dataset | BFCL V3 |
-| Validation Samples | 25 per scenario |
-| Test Samples | 100 per scenario |
-| Retrieval | BM25 + LLM Ranking |
-| Top-K Candidates | 3, 5, 8, 12 |
-| Concurrency | 4 |
-| Metrics | Accuracy, F1, p95 Latency |
-| API Success | 100% across all reported evaluations |
+## 1. 시작
 
-Five approaches were evaluated:
+```bash
+unzip tool_router_bench_luna_auto.zip -d tool_router_bench_luna_auto
+cd tool_router_bench_luna_auto
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export OPENAI_API_KEY='sk-...'
+python test_smoke.py
+```
 
-1. **Numeric Router:** Predict a numeric Tool ID.
-2. **Joint Router:** Predict Tool ID and Search Query simultaneously.
-3. **ReAct-style Router:** Reconsider routing through a recovery step.
-4. **Parallel Multi-tool Selection:** Select multiple Tools.
-5. **Sequential Tool Combination:** Predict ordered Tool calls.
+## 2. 전체 실험 (자동 데이터 다운로드 + API 평가)
 
-Both single-turn and multi-turn scenarios were evaluated. Multi-turn evaluation includes conversation history but does not reproduce a fully stateful tool execution environment.
+```bash
+python bench.py \
+  --model gpt-6-luna \
+  --effort none \
+  --data-dir ./bfcl_data \
+  --val 25 --test 100 \
+  --topks 3,5,8,12 \
+  --distractors 24 \
+  --concurrency 4 \
+  --out results_luna
+```
 
----
+처음 실행하면 HF의 [`gorilla-llm/Berkeley-Function-Calling-Leaderboard`](https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard)에서 **22개 원본 파일**을 다운로드합니다. 데이터는 `bfcl_data/`에 캐시되며 다음 실행부터는 재사용합니다. 네트워크 정책상 HF 직접 접속이 안 된다면 필요한 22개 파일을 수동으로 배치한 후 `--no-download`로 실행할 수 있습니다.
 
-### 2. Validation: LLM Only vs Retrieval + Ranking
+Hugging Face rate limit에 걸리면 `HF_TOKEN` 환경 변수를 사용할 수 있습니다. 원본 파일을 다운로드하는 데는 `OPENAI_API_KEY`가 필요하지 않습니다.
 
-| Router | Strategy | K | Single Acc. | Multi Acc. | Average |
-|---|---|---:|---:|---:|---:|
-| **Numeric** | **LLM Only** | **0** | **0.960** | **0.760** | **0.860** |
-| Joint | LLM Only | 0 | 0.960 | 0.680 | 0.820 |
-| Numeric | Retrieval | 3 | 0.960 | 0.680 | 0.820 |
-| Joint | Retrieval | 3 | 0.880 | 0.600 | 0.740 |
-| Numeric | Retrieval | 5 | 0.960 | 0.680 | 0.820 |
-| Joint | Retrieval | 5 | 0.960 | 0.640 | 0.800 |
-| Numeric | Retrieval | 8 | 0.960 | 0.640 | 0.800 |
-| Joint | Retrieval | 8 | 0.960 | 0.720 | 0.840 |
-| Numeric | Retrieval | 12 | 0.960 | 0.520 | 0.740 |
-| Joint | Retrieval | 12 | 0.960 | 0.680 | 0.820 |
+### 데이터 다운로드만 실행
 
-**Best Validation Configuration: Numeric Router + LLM Only (Average Accuracy 86.0%)**
+```bash
+python bench.py --download-only --data-dir ./bfcl_data
+python bench.py --check-data --data-dir ./bfcl_data
+python bench.py --list-urls
+```
 
-#### Key Findings
+### 저비용 샘플 테스트
 
-- Numeric Router + LLM Only achieved the highest average validation accuracy of **86.0%**.
-- Joint Router + Retrieval K=8 was the strongest retrieval-based configuration, reaching **84.0%** average accuracy.
-- Numeric Router exceeded Joint Router by 8 percentage points on multi-turn validation without retrieval (76% vs 68%).
-- Single-turn accuracy remained at 96% for nearly all configurations, suggesting limited discrimination between strategies on this subset.
-- Numeric Router retrieval accuracy decreased from 68% at K=3/5 to 52% at K=12 on multi-turn samples.
-- Retrieval did not improve routing accuracy over LLM Only in this experiment.
+```bash
+python bench.py --val 5 --test 5 --topks 3,5 \
+  --concurrency 2 --out results_luna_smoke
+```
 
-**Interpretation:** For the evaluated candidate sets, additional BM25 candidate filtering did not provide a consistent routing benefit. Direct numeric selection was more reliable, particularly for multi-turn queries.
+## 3. 평가 순서
 
-These results do not establish that retrieval is generally unnecessary. Larger Tool registries, different distractors, and semantic retrieval models may change the outcome.
+| 단계 | 비교 | 지표 |
+|---|---|---|
+| 1 | 숫자 Tool ID만 생성, Single/Multi-turn | Accuracy, Precision, Recall, F1 |
+| 2 | Tool ID + Query joint 생성, Single/Multi-turn | Accuracy, F1, Query 생성률 |
+| 1차 튜닝 | LLM-only vs BM25 Top-K + LLM rank, K=3/5/8/12 | Validation Accuracy, Candidate Recall, Latency |
+| 3 | 선택된 전략으로 ReAct-style Conditional Re-routing | Accuracy, Recovery/Regression Rate |
+| 4 | Multi-tool 집합 선택 | Mean Instance Precision/Recall/F1 |
+| 5 | Combination(여러 Tool과 순서·중복) 선택 | Precision/Recall/F1, Ordered LCS Recall |
 
----
+단일턴·멀티턴 각 테스트 그룹에서 100개를 추출하며 Validation은 25개씩 별도로 추출합니다. 정답 후보가 충분하지 않으면 데이터 수를 임의로 채우지 않고 오류로 알려줍니다. `--test`와 `--val`을 줄여 재실행할 수 있습니다. 샘플은 대화 ID 단위로 Validation과 Test를 나눕니다.
 
-### 3. Test: Numeric vs Joint Routing
+**방식 선택**: 1~2의 각 후보(LLM-only + BM25 Top-K)를 Validation 단일/멀티턴 Accuracy의 평균으로 비교하고, 동점일 때 평균 Latency를 비교합니다. Test 단계에서는 별도로 튜닝하지 않습니다. 3~5번은 Validation 승자만 실행합니다.
 
-| Method | Scenario | Accuracy | F1 | p95 Latency |
-|---|---|---:|---:|---:|
-| **Numeric / LLM Only** | Single-turn | **1.000** | **1.000** | 1.83s |
-| **Numeric / LLM Only** | Multi-turn | **0.660** | **0.660** | 3.77s |
-| Joint / Retrieval K=8 | Single-turn | 0.960 | 0.960 | **1.67s** |
-| Joint / Retrieval K=8 | Multi-turn | 0.620 | 0.620 | **2.72s** |
+**지표**:
+- Routing Accuracy: 하나의 정답 Tool 이름과 예측 이름이 같은 비율 (1/2/3 단계).
+- Mean Instance Precision/Recall/F1: 정답 및 예측 Tool 이름의 집합을 비교해 인스턴스별 계산 후 평균. Multi-tool은 순서를 반영하지 않습니다.
+- Candidate Recall: 후보 목록에 포함된 정답 Tool 비율.
+- Ordered LCS Recall: Combination 호출 순서를 고려한 최장 공통 부분 수열 길이 / 정답 시퀀스 길이.
+- Latency: 전체 평균, 중간값, p95. API token 사용량과 LLM 호출 수도 기록합니다.
 
-#### Key Findings
+## 4. 출력
 
-**Numeric Router achieved higher Tool Selection Accuracy.**
+- `summary.md`: 단계별 지표 표
+- `summary.csv`, `summary.json`: 전체 측정치, 승자, 데이터 소스
+- `predictions.jsonl`: 샘플별 정답/예측, Latency, token, error, 생성 쿼리, 캐시 키(재실행 시 API 호출 재사용)
 
-- Single-turn: Numeric 100% vs Joint 96% (+4 percentage points).
-- Multi-turn: Numeric 66% vs Joint 62% (+4 percentage points).
-- Combined average: Numeric 83% vs Joint 79%.
+기존 결과와 섞이지 않도록 새로운 `--out` 폴더를 사용하세요.
 
-However, the Joint Router with Retrieval K=8 showed lower p95 latency on both test scenarios. In multi-turn evaluation, p95 latency was 2.72s compared with 3.77s for Numeric LLM Only.
+## 5. 주요 옵션
 
-Because the tested methods use different candidate selection strategies, these differences reflect the complete routing pipelines rather than the output formats alone.
+| 옵션 | 기본값 | 의미 |
+|---|---|---|
+| `--model` | `gpt-6-luna` | OpenAI 모델 |
+| `--effort` | `none` | `reasoning_effort` (none/low/medium/high/xhigh/max) |
+| `--data-dir` | `./bfcl_data` | 데이터 캐시 디렉터리 |
+| `--revision` | `main` | HF 브랜치/커밋. 재현성을 위해 SHA 권장 |
+| `--download-only` | off | 다운로드만 수행 |
+| `--no-download` | off | 다운로드 중단, 로컬 파일만 사용 |
+| `--force-download` | off | 데이터 다시 받기 |
+| `--hf-workers` | 6 | 데이터 다운로드 동시 연결 수 |
+| `--concurrency` | 4 | OpenAI 동시 호출 수 |
+| `--timeout` | 60s | API 요청 타임아웃 |
+| `--api-retries` | 2 | SDK 재시도 횟수 |
+| `--temperature` | 미지정 | 필요한 경우 `--effort none`과만 사용 |
 
-**Interpretation:** Numeric prediction provided the highest accuracy in the tested configurations, while Joint Routing offered a latency trade-off. Generating Tool IDs and Queries together did not demonstrate an accuracy advantage.
+## 6. 데이터 해석상 한계
 
-The actual retrieval quality of generated Search Queries was not measured.
-
----
-
-### 4. ReAct-style Routing
-
-| Scenario | Baseline Accuracy | ReAct Accuracy | Baseline p95 | ReAct p95 |
-|---|---:|---:|---:|---:|
-| Single-turn | 1.000 | 1.000 | 1.83s | 2.13s |
-| Multi-turn | 0.660 | 0.660 | 3.77s | 3.41s |
-
-#### Key Findings
-
-- ReAct did not improve aggregate routing accuracy.
-- Single-turn p95 latency increased by 0.30s.
-- Multi-turn p95 latency decreased by 0.36s, despite unchanged accuracy.
-- The current aggregate metrics do not reveal how frequently the recovery mechanism activated or whether it corrected individual routing errors.
-
-**Interpretation:** The current ReAct-style recovery mechanism has not demonstrated a measurable accuracy benefit.
-
-Improving failure detection, collecting explicit Tool execution feedback, and measuring successful corrections may be more valuable than adding unconditional reasoning steps.
-
----
-
-### 5. Multi-tool and Combination Evaluation
-
-| Experiment | Single-turn F1 | Multi-turn F1 | Single p95 | Multi p95 |
-|---|---:|---:|---:|---:|
-| Parallel Multi-tool | **0.995** | 0.567 | 1.77s | 1.87s |
-| Sequential Combination | 0.738 | 0.556 | 1.65s | 2.03s |
-
-#### Key Findings
-
-**Parallel Multi-tool Selection**
-
-- Single-turn F1 reached 99.5%.
-- Multi-turn F1 dropped to 56.7%.
-- The 42.8 percentage-point difference indicates a substantial performance gap when conversational context is introduced.
-
-**Sequential Tool Combination**
-
-- Single-turn F1 reached 73.8%.
-- Multi-turn F1 decreased to 55.6%.
-- Performance was lower than Parallel Multi-tool Selection in both scenarios.
-
-**Interpretation:** Selecting multiple Tools for a single request was highly effective in this benchmark, while predicting a sequence of Tool calls was more difficult.
-
-Multi-turn scenarios remain challenging for both approaches. Sequence prediction likely requires additional work on dependencies, state representation, and intermediate-result handling.
-
-Parallel and Sequential F1 values correspond to different tasks, so the differences should not be interpreted as a direct ranking of general-purpose agent performance.
-
----
-
-### 6. Overall Analysis
-
-| Experiment | Single-turn | Multi-turn | Observation |
-|---|---:|---:|---|
-| Numeric Router | 100% Acc. | 66% Acc. | Highest tested routing accuracy |
-| Joint Router | 96% Acc. | 62% Acc. | Lower p95 latency |
-| ReAct Router | 100% Acc. | 66% Acc. | No aggregate accuracy improvement |
-| Parallel Multi-tool | 99.5% F1 | 56.7% F1 | Strong single-turn performance |
-| Sequential Combination | 73.8% F1 | 55.6% F1 | Tool sequencing remains challenging |
-
-### 7. Conclusions
-
-**1. Numeric-only Tool Selection is the strongest tested baseline.**
-
-Direct Tool ID prediction achieved 100% single-turn accuracy and 66% multi-turn accuracy on the 100-sample test subsets.
-
-**2. Retrieval + Ranking did not consistently improve accuracy.**
-
-The strongest retrieval-based validation configuration achieved 84% average accuracy, compared with 86% for Numeric LLM Only. Candidate retrieval may still become useful as Tool catalog size increases.
-
-**3. Multi-turn Routing is the primary accuracy bottleneck.**
-
-Numeric routing accuracy dropped by 34 percentage points between single-turn and multi-turn evaluations. Similar degradation appeared in Joint Routing, Parallel Multi-tool Selection, and Sequential Combination.
-
-**4. ReAct-style recovery requires better failure signals.**
-
-The recovery mechanism produced no aggregate accuracy improvement. Future versions should distinguish routing failures, invalid arguments, missing information, and unsuccessful Tool execution.
-
-**5. Tool dependencies introduce additional complexity.**
-
-Sequential Combination achieved 73.8% F1 on single-turn and 55.6% F1 on multi-turn scenarios, suggesting room for improvement in planning and ordered Tool selection.
-
-### 8. Limitations and Future Work
-
-- **Sample size:** Validation contains only 25 samples per scenario. One additional correct prediction changes validation accuracy by 4 percentage points.
-- **Tool catalog:** LLM Only uses a restricted candidate set with distractors, rather than a full production-scale Tool registry.
-- **Retrieval:** BM25 retrieval was evaluated; Cross-Encoder or embedding-based retrieval was not compared.
-- **Multi-turn:** Conversation history is included, but real Tool execution state is not fully simulated.
-- **ReAct:** Aggregate results do not establish actual recovery success or correction frequency.
-- **Query generation:** Generated Search Query relevance and retrieval effectiveness were not evaluated.
-- **Latency:** p95 latency depends on network conditions, API load, and concurrency. Repeated trials are needed for stable comparisons.
-- **Generalization:** The 100% single-turn Numeric result should be verified using larger, independently sampled and more challenging candidate sets, including checks for unintended answer leakage.
-
-Recommended next experiments are multi-turn history selection, contrastive hard-negative Tool candidates, Cross-Encoder Tool re-ranking, and execution-feedback-driven Re-routing.
-
-### Final Takeaway
-
-**GPT-6 Luna demonstrated strong single-turn Tool Selection performance using numeric Tool IDs, reaching 100% accuracy on the evaluated test subset. Multi-turn routing and sequential Tool combinations remain the main areas for improvement.**
-
-Under the evaluated conditions, Numeric LLM Only is the preferred accuracy-oriented baseline. Further experiments are required to determine whether this advantage persists across larger Tool catalogs and full stateful agent execution.
+- BFCL 공식 평가 스코어가 아닙니다. **Tool 이름 선택만** 확인하며 arguments 및 실제 Tool 실행 결과는 점수에 포함되지 않습니다.
+- Joint Query는 BFCL에 별도 Query 정답이 없어 비어 있지 않은지 여부만 측정합니다. Query의 검색 성능을 측정하지 않습니다.
+- ReAct-style 단계는 실제 Tool을 실행하지 않습니다. BM25 메타데이터 관련성을 관찰 신호로 사용해 조건부 재선택하는 실험입니다.
+- Multi-turn은 이전 **사용자 발화만** 전송합니다. Tool 결과, 상태 변경, `initial_config`를 시뮬레이션하지 않습니다.
+- `--distractors`로 무관한 Tool 후보를 추가해 평가 난도를 높입니다. BFCL 원본 후보 목록이 아니라 확장된 후보 목록에서 측정됩니다.
+- 입력 데이터는 공개 BFCL이지만, 평가 프롬프트는 OpenAI API로 전송됩니다. 사내 비공개 데이터로 확장할 때 별도 승인/보안 정책을 확인하세요.
+- 결과를 재현하려면 BFCL의 커밋 SHA를 `--revision`에 고정하고 요청 concurrency/effort를 동일하게 유지하세요.
